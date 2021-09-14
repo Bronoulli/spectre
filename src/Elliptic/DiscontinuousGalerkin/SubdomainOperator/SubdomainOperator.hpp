@@ -392,7 +392,6 @@ struct SubdomainOperator
         [this, &operand](const auto&... args) {
           elliptic::dg::prepare_mortar_data<System, linearized>(
               make_not_null(&central_auxiliary_vars_),
-              make_not_null(&central_auxiliary_fluxes_),
               make_not_null(&central_primal_fluxes_),
               make_not_null(&central_mortar_data_), operand.element_data,
               args...);
@@ -431,7 +430,7 @@ struct SubdomainOperator
           auto remote_boundary_data =
               elliptic::dg::zero_boundary_data_on_mortar<
                   typename System::primal_fields,
-                  typename System::primal_fluxes>(
+                  typename System::auxiliary_fields>(
                   direction_from_neighbor, neighbor_mesh,
                   all_neighbor_face_normal_magnitudes.at(overlap_id)
                       .at(direction_from_neighbor),
@@ -505,7 +504,6 @@ struct SubdomainOperator
             [this, &overlap_id](const auto&... args) {
               elliptic::dg::prepare_mortar_data<System, linearized>(
                   make_not_null(&neighbors_auxiliary_vars_[overlap_id]),
-                  make_not_null(&neighbors_auxiliary_fluxes_[overlap_id]),
                   make_not_null(&neighbors_primal_fluxes_[overlap_id]),
                   make_not_null(&neighbors_mortar_data_[overlap_id]),
                   extended_operand_vars_[overlap_id], args...);
@@ -611,7 +609,8 @@ struct SubdomainOperator
                 all_neighbors_neighbor_mortar_meshes.at(overlap_id)
                     .at(neighbor_mortar_id);
             auto zero_mortar_data = elliptic::dg::zero_boundary_data_on_mortar<
-                typename System::primal_fields, typename System::primal_fluxes>(
+                typename System::primal_fields,
+                typename System::auxiliary_fields>(
                 neighbors_neighbor_direction,
                 all_neighbors_neighbor_meshes.at(overlap_id)
                     .at(neighbor_mortar_id),
@@ -646,7 +645,8 @@ struct SubdomainOperator
               make_not_null(&central_mortar_data_), operand.element_data,
               central_primal_fluxes_, args...);
         },
-        box, temporal_id, sources_args, data_is_zero);
+        box, temporal_id, fluxes_args, sources_args, fluxes_args_on_faces,
+        data_is_zero);
     // Apply on neighbors
     for (const auto& [direction, neighbors] : central_element.neighbors()) {
       const auto& orientation = neighbors.orientation();
@@ -661,6 +661,25 @@ struct SubdomainOperator
           continue;
         }
 
+        const auto fluxes_args_on_overlap =
+            elliptic::util::apply_at<fluxes_args_tags_overlap,
+                                     args_tags_from_center>(get_items, box,
+                                                            overlap_id);
+        const auto sources_args_on_overlap =
+            elliptic::util::apply_at<sources_args_tags_overlap,
+                                     args_tags_from_center>(get_items, box,
+                                                            overlap_id);
+        DirectionMap<Dim, FluxesArgs> fluxes_args_on_overlap_faces{};
+        for (const auto& neighbor_direction :
+             Direction<Dim>::all_directions()) {
+          fluxes_args_on_overlap_faces.emplace(
+              neighbor_direction,
+              elliptic::util::apply_at<fluxes_args_tags_overlap_faces,
+                                       args_tags_from_center>(
+                  get_items, box,
+                  std::forward_as_tuple(overlap_id, neighbor_direction)));
+        }
+
         elliptic::util::apply_at<apply_args_tags_overlap,
                                  args_tags_from_center>(
             [this, &overlap_id](const auto&... args) {
@@ -670,10 +689,8 @@ struct SubdomainOperator
                   extended_operand_vars_.at(overlap_id),
                   neighbors_primal_fluxes_.at(overlap_id), args...);
             },
-            box, overlap_id, temporal_id,
-            elliptic::util::apply_at<sources_args_tags_overlap,
-                                     args_tags_from_center>(get_items, box,
-                                                            overlap_id),
+            box, overlap_id, temporal_id, fluxes_args_on_overlap,
+            sources_args_on_overlap, fluxes_args_on_overlap_faces,
             data_is_zero);
 
         // Restrict the extended operator data back to the subdomain, assuming
@@ -708,9 +725,6 @@ struct SubdomainOperator
   // NOLINTNEXTLINE(spectre-mutable)
   mutable Variables<typename System::primal_fluxes> central_primal_fluxes_{};
   // NOLINTNEXTLINE(spectre-mutable)
-  mutable Variables<typename System::auxiliary_fluxes>
-      central_auxiliary_fluxes_{};
-  // NOLINTNEXTLINE(spectre-mutable)
   mutable LinearSolver::Schwarz::OverlapMap<
       Dim, Variables<typename System::auxiliary_fields>>
       neighbors_auxiliary_vars_{};
@@ -718,10 +732,6 @@ struct SubdomainOperator
   mutable LinearSolver::Schwarz::OverlapMap<
       Dim, Variables<typename System::primal_fluxes>>
       neighbors_primal_fluxes_{};
-  // NOLINTNEXTLINE(spectre-mutable)
-  mutable LinearSolver::Schwarz::OverlapMap<
-      Dim, Variables<typename System::auxiliary_fluxes>>
-      neighbors_auxiliary_fluxes_{};
   // NOLINTNEXTLINE(spectre-mutable)
   mutable LinearSolver::Schwarz::OverlapMap<
       Dim, Variables<typename System::primal_fields>>
@@ -733,13 +743,13 @@ struct SubdomainOperator
   // NOLINTNEXTLINE(spectre-mutable)
   mutable ::dg::MortarMap<
       Dim, elliptic::dg::MortarData<size_t, typename System::primal_fields,
-                                    typename System::primal_fluxes>>
+                                    typename System::auxiliary_fields>>
       central_mortar_data_{};
   // NOLINTNEXTLINE(spectre-mutable)
   mutable LinearSolver::Schwarz::OverlapMap<
       Dim, ::dg::MortarMap<Dim, elliptic::dg::MortarData<
                                     size_t, typename System::primal_fields,
-                                    typename System::primal_fluxes>>>
+                                    typename System::auxiliary_fields>>>
       neighbors_mortar_data_{};
 };
 

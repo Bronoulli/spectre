@@ -22,9 +22,12 @@
 #include "Elliptic/DiscontinuousGalerkin/SubdomainOperator/SubdomainOperator.hpp"
 #include "Elliptic/SubdomainPreconditioners/MinusLaplacian.hpp"
 #include "Elliptic/SubdomainPreconditioners/RegisterDerived.hpp"
+#include "Elliptic/Systems/Elasticity/Actions/InitializeConstitutiveRelation.hpp"
+#include "Elliptic/Systems/Elasticity/Actions/ObservePerLayer.hpp"
 #include "Elliptic/Systems/Elasticity/BoundaryConditions/Factory.hpp"
 #include "Elliptic/Systems/Elasticity/FirstOrderSystem.hpp"
 #include "Elliptic/Systems/Elasticity/Tags.hpp"
+#include "Elliptic/Systems/Poisson/FirstOrderSystem.hpp"
 #include "Elliptic/Tags.hpp"
 #include "Elliptic/Triggers/Factory.hpp"
 #include "IO/Observer/Actions/RegisterEvents.hpp"
@@ -40,6 +43,7 @@
 #include "Parallel/PhaseDependentActionList.hpp"
 #include "Parallel/Reduction.hpp"
 #include "Parallel/RegisterDerivedClassesWithCharm.hpp"
+#include "ParallelAlgorithms/Actions/AddComputeTags.hpp"
 #include "ParallelAlgorithms/Actions/MutateApply.hpp"
 #include "ParallelAlgorithms/Actions/RemoveOptionsAndTerminatePhase.hpp"
 #include "ParallelAlgorithms/Actions/TerminatePhase.hpp"
@@ -54,6 +58,7 @@
 #include "ParallelAlgorithms/LinearSolver/Gmres/Gmres.hpp"
 #include "ParallelAlgorithms/LinearSolver/Multigrid/ElementsAllocator.hpp"
 #include "ParallelAlgorithms/LinearSolver/Multigrid/Multigrid.hpp"
+#include "ParallelAlgorithms/LinearSolver/Schwarz/Actions/ResetSubdomainSolver.hpp"
 #include "ParallelAlgorithms/LinearSolver/Schwarz/Schwarz.hpp"
 #include "ParallelAlgorithms/LinearSolver/Tags.hpp"
 #include "PointwiseFunctions/AnalyticSolutions/Elasticity/Factory.hpp"
@@ -141,7 +146,7 @@ struct Metavariables {
   using subdomain_operator =
       elliptic::dg::subdomain_operator::SubdomainOperator<
           system, SolveElasticity::OptionTags::SchwarzSmootherGroup,
-          tmpl::list<Elasticity::Tags::ConstitutiveRelation<Dim>>>;
+          tmpl::list<Elasticity::Tags::ConstitutiveRelationPerBlockBase>>;
   using subdomain_preconditioners = tmpl::list<
       elliptic::subdomain_preconditioners::Registrars::MinusLaplacian<
           Dim, SolveElasticity::OptionTags::SchwarzSmootherGroup>>;
@@ -166,17 +171,22 @@ struct Metavariables {
   using error_tags = db::wrap_tags_in<Tags::Error, analytic_solution_fields>;
   using observe_fields = tmpl::append<
       analytic_solution_fields, error_tags,
-      tmpl::list<Elasticity::Tags::StrainCompute<volume_dim>,
-                 Elasticity::Tags::PotentialEnergyDensityCompute<volume_dim>,
+      tmpl::list<Elasticity::Tags::Strain<volume_dim>,
+                 Elasticity::Tags::MinusStress<volume_dim>,
+                 Elasticity::Tags::PotentialEnergyDensity<volume_dim>,
                  domain::Tags::Coordinates<volume_dim, Frame::Inertial>>>;
   using observer_compute_tags =
       tmpl::list<::Events::Tags::ObserverMeshCompute<volume_dim>,
                  error_compute>;
 
+  // Set up the action to observe reductions per-layer
+  using observer_per_layer_action = Elasticity::Actions::ObservePerLayer<
+      volume_dim, linear_solver_iteration_id,
+      LinearSolver::multigrid::Tags::IsFinestGrid>;
+
   // Collect all items to store in the cache.
   using const_global_cache_tags =
-      tmpl::list<background_tag, initial_guess_tag,
-                 Elasticity::Tags::ConstitutiveRelation<volume_dim>>;
+      tmpl::list<background_tag, initial_guess_tag>;
 
   struct factory_creation
       : tt::ConformsTo<Options::protocols::FactoryCreation> {
@@ -216,7 +226,8 @@ struct Metavariables {
   using observed_reduction_data_tags =
       observers::collect_reduction_data_tags<tmpl::flatten<tmpl::list<
           tmpl::at<typename factory_creation::factory_classes, Event>,
-          linear_solver, multigrid, schwarz_smoother>>>;
+          linear_solver, multigrid, schwarz_smoother,
+          observer_per_layer_action>>>;
 
   using initialization_actions = tmpl::list<
       elliptic::dg::Actions::InitializeDomain<volume_dim>,
@@ -225,11 +236,16 @@ struct Metavariables {
       typename schwarz_smoother::initialize_element,
       elliptic::Actions::InitializeFields<system, initial_guess_tag>,
       elliptic::Actions::InitializeFixedSources<system, background_tag>,
+      Elasticity::Actions::InitializeConstitutiveRelation<Dim>,
       elliptic::Actions::InitializeOptionalAnalyticSolution<
           background_tag,
           tmpl::append<typename system::primal_fields,
                        typename system::primal_fluxes>,
           elliptic::analytic_data::AnalyticSolution>,
+      ::Initialization::Actions::AddComputeTags<tmpl::list<
+          Elasticity::Tags::StrainCompute<volume_dim>,
+          Elasticity::Tags::StressCompute<volume_dim>,
+          Elasticity::Tags::PotentialEnergyDensityCompute<volume_dim>>>,
       elliptic::dg::Actions::initialize_operator<system>,
       elliptic::dg::subdomain_operator::Actions::InitializeSubdomain<
           system, background_tag, typename schwarz_smoother::options_group>,
@@ -238,7 +254,7 @@ struct Metavariables {
       // Apply the DG operator to the initial guess
       elliptic::dg::Actions::apply_operator<
           system, true, linear_solver_iteration_id, fields_tag, fluxes_vars_tag,
-          operator_applied_to_fields_tag, vars_tag, fluxes_vars_tag>,
+          operator_applied_to_fields_tag, vars_tag>,
       Initialization::Actions::RemoveOptionsAndTerminatePhase>;
 
   using build_linear_operator_actions = elliptic::dg::Actions::apply_operator<
@@ -249,6 +265,8 @@ struct Metavariables {
       tmpl::list<observers::Actions::RegisterEventsWithObservers,
                  typename multigrid::register_element,
                  typename schwarz_smoother::register_element,
+                 observers::Actions::RegisterWithObservers<
+                     typename observer_per_layer_action::RegisterWithObservers>,
                  Parallel::Actions::TerminatePhase>;
 
   template <typename Label>
@@ -257,8 +275,10 @@ struct Metavariables {
                                                 Label>;
 
   using solve_actions = tmpl::list<
+      LinearSolver::Schwarz::Actions::ResetSubdomainSolver<
+          typename schwarz_smoother::options_group>,
       typename linear_solver::template solve<tmpl::list<
-          Actions::RunEventsAndTriggers,
+          Actions::RunEventsAndTriggers, observer_per_layer_action,
           typename multigrid::template solve<
               build_linear_operator_actions,
               smooth_actions<LinearSolver::multigrid::VcycleDownLabel>,
