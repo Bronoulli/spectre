@@ -7,14 +7,7 @@
 # More information:
 # https://github.com/sxs-collaboration/WelcomeToSXS/wiki/Ocean
 
-{% block head %}
-{{ super() -}}
-#SBATCH --nodes {{ num_nodes | default(1) }}
-#SBATCH --ntasks-per-node 1
-#SBATCH --cpus-per-task 20
-#SBATCH -p {{ queue | default("orca-1") }}
-#SBATCH -t {{ time_limit | default("1-00:00:00") }}
-{% endblock %}
+
 
 {% block run_command %}
 export OPENBLAS_NUM_THREADS=1
